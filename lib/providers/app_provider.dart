@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/models.dart';
-import '../services/llm_service.dart';
+import '../services/llm_service.dart' show buildSystemPrompt;
 
 class AppProvider extends ChangeNotifier {
   // Auth
@@ -18,7 +18,7 @@ class AppProvider extends ChangeNotifier {
   List<HabitModel> habits = sampleHabits;
   MovingModel moving = sampleMoving;
 
-  // Chat history — shared with LLM service for context
+  // Chat history
   List<Map<String, String>> chatHistory = [];
 
   AppProvider() {
@@ -69,7 +69,8 @@ class AppProvider extends ChangeNotifier {
   }
 
   // ── Build system prompt for LLM ────────────────────────────────────────────
-  String buildSystemPrompt() {
+  // Calls the top-level buildSystemPrompt() from llm_service.dart
+  String getSystemPrompt() {
     return buildSystemPrompt(
       name: profile.name,
       travelStyle: profile.travelStyle,
@@ -103,7 +104,6 @@ class AppProvider extends ChangeNotifier {
   }
 
   void updateLastAIMessage(String text) {
-    // Update the last AI message in-place (for streaming)
     for (int i = chatHistory.length - 1; i >= 0; i--) {
       if (chatHistory[i]['role'] == 'ai') {
         chatHistory[i] = {'role': 'ai', 'text': text};

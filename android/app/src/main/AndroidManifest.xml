@@ -1,4 +1,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <permission
+        android:name="NetworkMonitor.permission.INTERNET"
+        android:protectionLevel="normal" />
+
     <application
         android:label="lifemap"
         android:name="${applicationName}"

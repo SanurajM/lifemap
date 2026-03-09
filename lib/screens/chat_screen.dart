@@ -60,7 +60,7 @@ class _ChatScreenState extends State<ChatScreen> {
     }
 
     try {
-      final systemPrompt = appProvider.buildSystemPrompt();
+      final systemPrompt = appProvider.getSystemPrompt();
 
       final stream = llmService.generateStream(
         userMessage: msg,

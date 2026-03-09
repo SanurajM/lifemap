@@ -1,31 +1,19 @@
-import 'dart:io';
-import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_gemma/flutter_gemma.dart';
-import 'package:path_provider/path_provider.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
-// ── Model config ──────────────────────────────────────────────────────────────
-// Gemma 3 1B int4 — ~600MB, runs on Android & iOS, GPU-accelerated
-const _modelFileName = 'gemma3-1B-it-int4.task';
-
-// Download from HuggingFace LiteRT community
-// No auth token needed for this public model
 const _modelUrl =
-    'https://huggingface.co/litert-community/Gemma3-1B-IT/resolve/main/gemma3-1B-it-int4.task';
+    'https://huggingface.co/litert-community/SmolLM-135M-Instruct/resolve/main/SmolLM-135M-Instruct_multi-prefill-seq_f32_ekv1280.task';
+const _modelFileName = 'SmolLM-135M-Instruct_multi-prefill-seq_f32_ekv1280.task';
+final _modelType = ModelType.general;
 
-const _modelReadyKey = 'llm_model_ready';
-
-// ── LLM Service ───────────────────────────────────────────────────────────────
 class LLMService extends ChangeNotifier {
-  // Download state
   LLMStatus _status = LLMStatus.checking;
   double _downloadProgress = 0.0;
   String _statusMessage = 'Checking...';
   String? _error;
-
-  // Inference state
   bool _isGenerating = false;
+
+  InferenceModel? _model;
 
   LLMStatus get status => _status;
   double get downloadProgress => _downloadProgress;
@@ -34,22 +22,22 @@ class LLMService extends ChangeNotifier {
   bool get isGenerating => _isGenerating;
   bool get isReady => _status == LLMStatus.ready;
 
-  // ── Initialise ──────────────────────────────────────────────────────────────
   Future<void> initialize() async {
     _setStatus(LLMStatus.checking, 'Checking for model...');
-
-    final modelPath = await _modelFilePath();
-    final prefs = await SharedPreferences.getInstance();
-    final modelReady = prefs.getBool(_modelReadyKey) ?? false;
-
-    if (modelReady && File(modelPath).existsSync()) {
-      await _loadModel(modelPath);
-    } else {
-      _setStatus(LLMStatus.needsDownload, 'Model not found. Download required.');
+    try {
+      final installed = await FlutterGemma.isModelInstalled(_modelFileName);
+      debugPrint('LLM: isModelInstalled=$installed');
+      if (installed) {
+        await _loadModel();
+      } else {
+        _setStatus(LLMStatus.needsDownload, 'Model not found. Download required (~530 MB).');
+      }
+    } catch (e, st) {
+      debugPrint('LLM initialize error: $e\n$st');
+      _setStatus(LLMStatus.needsDownload, 'Could not check model. Tap to download.');
     }
   }
 
-  // ── Download ────────────────────────────────────────────────────────────────
   Future<void> downloadModel() async {
     _setStatus(LLMStatus.downloading, 'Starting download...');
     _downloadProgress = 0;
@@ -57,157 +45,141 @@ class LLMService extends ChangeNotifier {
     notifyListeners();
 
     try {
-      final modelPath = await _modelFilePath();
-      final dio = Dio();
-
-      await dio.download(
-        _modelUrl,
-        modelPath,
-        onReceiveProgress: (received, total) {
-          if (total > 0) {
-            _downloadProgress = received / total;
-            _statusMessage =
-                'Downloading Gemma 3 1B... ${(received / 1024 / 1024).toStringAsFixed(0)} MB / ${(total / 1024 / 1024).toStringAsFixed(0)} MB';
+      debugPrint('LLM: Starting install from network...');
+      await FlutterGemma.installModel(modelType: _modelType)
+          .fromNetwork(_modelUrl)
+          .withProgress((int progress) {
+            _downloadProgress = progress / 100.0;
+            _statusMessage = 'Downloading SmolLM 135M... $progress%';
             notifyListeners();
-          }
-        },
-        options: Options(
-          receiveTimeout: const Duration(minutes: 20),
-          sendTimeout: const Duration(minutes: 5),
-        ),
-      );
+          })
+          .install();
 
-      // Mark as downloaded
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setBool(_modelReadyKey, true);
-
-      _setStatus(LLMStatus.loading, 'Loading model into memory...');
-      await _loadModel(modelPath);
-    } on DioException catch (e) {
-      _error = 'Download failed: ${e.message}';
-      _setStatus(LLMStatus.error, 'Download failed. Check connection and retry.');
-      debugPrint('LLM download error: $e');
-    } catch (e) {
-      _error = e.toString();
-      _setStatus(LLMStatus.error, 'Unexpected error. Please retry.');
-      debugPrint('LLM unexpected error: $e');
+      debugPrint('LLM: install() completed successfully, now loading...');
+      _setStatus(LLMStatus.loading, 'Download complete. Loading into memory...');
+      await _loadModel();
+    } catch (e, st) {
+      // Show the REAL error in both the UI and logs
+      final msg = e.toString();
+      _error = msg;
+      debugPrint('LLM downloadModel error: $msg\n$st');
+      _setStatus(LLMStatus.error, 'Error: $msg');
     }
   }
 
-  // ── Load model ──────────────────────────────────────────────────────────────
-  Future<void> _loadModel(String path) async {
+  Future<void> _loadModel() async {
     _setStatus(LLMStatus.loading, 'Loading AI model...');
     try {
-      await FlutterGemmaPlugin.instance.init(
-        modelPath: path,
-        maxTokens: 512,
-        temperature: 0.8,
-        topK: 40,
-        randomSeed: 42,
-      );
-      _setStatus(LLMStatus.ready, 'AI ready');
-    } catch (e) {
-      // If model file is corrupt, delete and prompt re-download
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setBool(_modelReadyKey, false);
-      final file = File(path);
-      if (await file.exists()) await file.delete();
+      debugPrint('LLM: calling getActiveModel...');
+      await _model?.close();
+      _model = null;
 
-      _error = e.toString();
-      _setStatus(LLMStatus.needsDownload, 'Model failed to load. Please re-download.');
-      debugPrint('LLM load error: $e');
+      // flutter_gemma loses "active model" state on app restart even if the
+      // file is on disk. Re-calling installModel with the same URL and the
+      // default KEEP policy skips the download and just re-registers the file.
+      debugPrint('LLM: re-activating model via installModel (KEEP policy)...');
+      await FlutterGemma.installModel(modelType: _modelType)
+          .fromNetwork(_modelUrl)
+          .install();
+
+      _model = await FlutterGemma.getActiveModel(
+        maxTokens: 1024,
+        preferredBackend: PreferredBackend.cpu,
+      );
+
+      debugPrint('LLM: model loaded successfully!');
+      _setStatus(LLMStatus.ready, 'AI ready · SmolLM 135M · On-device');
+    } catch (e, st) {
+      final msg = e.toString();
+      _error = msg;
+      debugPrint('LLM _loadModel error: $msg\n$st');
+      _setStatus(LLMStatus.error, 'Load error: $msg');
     }
   }
 
-  // ── Generate (streaming) ────────────────────────────────────────────────────
-  // Returns a stream of token strings
   Stream<String> generateStream({
     required String userMessage,
     required String systemPrompt,
     required List<Map<String, String>> history,
   }) async* {
-    if (!isReady) return;
+    if (!isReady || _model == null) {
+      yield '⚠️ AI model not ready. Please download it first.';
+      return;
+    }
 
     _isGenerating = true;
     notifyListeners();
 
     try {
-      // Build message list for flutter_gemma
-      // Prepend system prompt as the first user turn (Gemma convention)
-      final messages = <Message>[
-        // System context as the very first message
-        Message(
-          text: systemPrompt,
-          isUser: true,
-        ),
-        // Conversation history (skip the first AI greeting for brevity)
-        ...history.skip(1).map((m) => Message(
-              text: m['text'] ?? '',
-              isUser: m['role'] == 'user',
-            )),
-        // Current user message
-        Message(text: userMessage, isUser: true),
-      ];
+      final chat = await _model!.createChat(
+        temperature: 0.7,
+        randomSeed: 42,
+        topK: 40,
+      );
 
-      final responseStream =
-          FlutterGemmaPlugin.instance.generateResponseAsync(messages: messages);
+      // For ModelType.general, system prompt must be prepended to the first
+      // user message — sending it as a separate chunk gets stripped to 2 chars.
+      bool systemInjected = false;
 
-      await for (final chunk in responseStream) {
-        if (chunk != null) {
-          yield chunk;
+      String prependSystem(String text) {
+        if (!systemInjected) {
+          systemInjected = true;
+          return '$systemPrompt\n\n$text';
+        }
+        return text;
+      }
+
+      for (final msg in history.skip(1)) {
+        final text = msg['text'] ?? '';
+        if (text.isEmpty) continue;
+        final isUser = msg['role'] == 'user';
+        await chat.addQueryChunk(
+          Message.text(
+            text: isUser ? prependSystem(text) : text,
+            isUser: isUser,
+          ),
+        );
+      }
+
+      await chat.addQueryChunk(
+        Message.text(text: prependSystem(userMessage), isUser: true),
+      );
+
+      await for (final response in chat.generateChatResponseAsync()) {
+        if (response is TextResponse) {
+          yield response.token;
         }
       }
-    } catch (e) {
-      debugPrint('LLM generation error: $e');
-      yield '\n\n[AI error: ${e.toString()}]';
+    } catch (e, st) {
+      debugPrint('LLM generateStream error: $e\n$st');
+      yield '\n\n[Error: ${e.toString()}]';
     } finally {
       _isGenerating = false;
       notifyListeners();
     }
   }
 
-  // ── Helpers ─────────────────────────────────────────────────────────────────
-  Future<String> _modelFilePath() async {
-    final dir = await getApplicationDocumentsDirectory();
-    return '${dir.path}/$_modelFileName';
-  }
-
-  Future<String> get modelSizeOnDisk async {
-    final path = await _modelFilePath();
-    final file = File(path);
-    if (!await file.exists()) return '0 MB';
-    final bytes = await file.length();
-    return '${(bytes / 1024 / 1024).toStringAsFixed(0)} MB';
-  }
-
   Future<void> deleteModel() async {
-    final path = await _modelFilePath();
-    final file = File(path);
-    if (await file.exists()) await file.delete();
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool(_modelReadyKey, false);
-    _setStatus(LLMStatus.needsDownload, 'Model deleted.');
+    await _model?.close();
+    _model = null;
+    _setStatus(LLMStatus.needsDownload, 'Model removed. Tap to re-download.');
   }
 
-  void _setStatus(LLMStatus status, String message) {
-    _status = status;
-    _statusMessage = message;
+  @override
+  void dispose() {
+    _model?.close();
+    super.dispose();
+  }
+
+  void _setStatus(LLMStatus s, String msg) {
+    _status = s;
+    _statusMessage = msg;
     notifyListeners();
   }
 }
 
-// ── Status enum ───────────────────────────────────────────────────────────────
-enum LLMStatus {
-  checking,
-  needsDownload,
-  downloading,
-  loading,
-  ready,
-  error,
-}
+enum LLMStatus { checking, needsDownload, downloading, loading, ready, error }
 
-// ── System Prompt Builder ─────────────────────────────────────────────────────
-// Injects all LifeMap context so Gemma responds with personal, relevant info
 String buildSystemPrompt({
   required String name,
   required String travelStyle,
@@ -222,41 +194,14 @@ String buildSystemPrompt({
   required String movingAddress,
   required int movingDaysLeft,
   required double movingProgress,
-}) {
-  return '''
-You are LifeMap AI, a personal life assistant embedded in the LifeMap app.
-You know everything about the user's life and give short, warm, practical responses.
+}) =>
+    '''You are LifeMap AI, a personal life assistant. Be warm, brief (3-5 sentences), and actionable.
 
-USER PROFILE:
-- Name: $name
-- Avatar: $avatar
-- Travel Style: $travelStyle
-- Diet: $diet
+USER: $name | Travel: $travelStyle | Diet: $diet
+TRIPS: ${upcomingTrips.isEmpty ? 'None' : upcomingTrips.join('; ')}
+TODAY: $dailyTasksDone/$dailyTasksTotal tasks done
+HABITS: ${habits.join('; ')} | Top streak: ${topStreak}d
+EVENTS: ${upcomingEvents.isEmpty ? 'None' : upcomingEvents.join('; ')}
+MOVING: To $movingAddress in ${movingDaysLeft}d (${(movingProgress * 100).round()}% done)
 
-TRIPS:
-${upcomingTrips.isEmpty ? '- No upcoming trips' : upcomingTrips.map((t) => '- $t').join('\n')}
-
-DAILY ROUTINE:
-- Today: $dailyTasksDone / $dailyTasksTotal tasks done
-
-HABITS:
-- Top streak: ${topStreak} days
-${habits.map((h) => '- $h').join('\n')}
-
-EVENTS:
-${upcomingEvents.isEmpty ? '- No upcoming events' : upcomingEvents.map((e) => '- $e').join('\n')}
-
-MOVING PLANNER:
-- Moving to: $movingAddress
-- In: $movingDaysLeft days
-- Progress: ${(movingProgress * 100).round()}% packed
-
-RULES:
-- Keep responses concise (3-5 sentences max unless asked for a list)
-- Be warm, encouraging, and personal — use the user's name occasionally
-- Give actionable tips based on their actual data above
-- Use emojis sparingly but naturally
-- Never make up data not mentioned above
-- If asked something outside the app's scope, answer helpfully but briefly
-''';
-}
+Only reference data above. Use emojis naturally. Never fabricate facts.''';
